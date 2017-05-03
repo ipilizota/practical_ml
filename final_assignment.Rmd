@@ -1,0 +1,126 @@
+---
+title: "Final Assignment"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Read in and explore the training dataset
+```{r}
+pml_training <- read.csv("~/data_science/practical_ml/pml-training.csv")
+head(pml_training)
+```
+Looks like there are a lot of NAs. Let's further explore it.
+```{r}
+dim(pml_training)
+na_count <-sapply(pml_training, function(y) sum(length(which(is.na(y)))))
+na_count <- data.frame(na_count)
+na_count
+```
+A lot of columns contain 19216 NAs (out of 19622 rows), hence they are not informative. Let's remove them.
+```{r}
+ind <- na_count <= 1
+pml_training <- pml_training[, ind]
+```
+Let's also remove rows which contain remaining NAs in the training datatset.
+```{r}
+pml_training <- na.omit(pml_training)
+head(pml_training)
+dim(pml_training)
+```
+Some fields contain errors *#DIV/0!*
+```{r}
+error_count <-sapply(pml_training, function(y) sum(y =="#DIV/0!"))
+error_count <- data.frame(error_count)
+error_count
+```
+Doesn't look bad, I won't remove any columns, just rows that contain errors.
+```{r}
+rows <- Reduce(union, lapply("#DIV/0!", function(a) which(rowSums(pml_training == a) > 0)))
+pml_training <- pml_training[-rows, ]
+```
+
+## Split the pml_training dataset into training and testing 
+```{r}
+set.seed(1906)
+library(caret)
+inTrain <- createDataPartition(y=pml_training$classe, p=0.6, list=FALSE)
+train <- pml_training[inTrain, ]
+test <- pml_training[-inTrain, ]
+```
+
+## Modelling
+
+Now, let's have a look at this cleaned training dataset.  
+There are various mesurements for belt, forearm, arm and dumbbell. As our body is a complex connected system, some of the predictors might be correlated. That's why I will do preprocessing with principal component analysis.   
+To optimise the *train* function, I will use k-folds cross validation with *k=10* taking 75% of the training dataset for training and remaining 25% for testing.  
+```{r}
+library(mlbench)
+library(parallel)
+library(doParallel)
+library(pROC)
+preProc <- preProcess(train[, -93], method='pca')
+trainPC <- predict(preProc, train[, -93])
+testPC <- predict(preProc, test[, -93])
+
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+fitControl <- trainControl(method = "cv", number = 10, p = 0.75, allowParallel = TRUE)
+```
+
+### 1) Generalised boosted regression
+Since I was running into memory issues, I will use only the first five PCA components for this model.
+```{r}
+#This one on small dataset
+data_train <- data.frame(train$classe, trainPC$PC1, trainPC$PC2, trainPC$PC3, trainPC$PC4, trainPC$PC5)
+data_test <- data.frame(test$classe, testPC$PC1, testPC$PC2, testPC$PC3, testPC$PC4, testPC$PC5)
+colnames(data_train) <- c("classe", "PC1", "PC2", "PC3", "PC4", "PC5")
+colnames(data_test) <- c("classe", "PC1", "PC2", "PC3", "PC4", "PC5")
+
+modelFit_gbr <- train(classe ~ ., method = "gbm", data=data_train, trControl = fitControl, verbose = FALSE)
+pred_gbr <- predict(modelFit_gbr, newdata=data_test) 
+confusionMatrix(pred_gbr, data_test$classe)
+```
+#### Out of sample error
+Thanks to *trControl = fitControl*, it's possible to do:
+```{r}
+sum(1-modelFit_gbr$results$Accuracy)/length(modelFit_gbr$results$Accuracy)
+```
+### 2) decision tree  
+I will use all non-empty columns of the PCA trainsformed dataset.
+```{r}
+trainPC <- trainPC[, c(1:3,37:65)]
+testPC <- testPC[, c(1:3,37:65)]
+modelFit_dt <- train(y=data_train$classe, x = trainPC, method="rpart", trControl = fitControl)
+pred_dt <- predict(modelFit_dt, newdata = testPC)
+confusionMatrix(pred_dt, data_test$classe)
+```
+#### Out of sample error
+Thanks to *trControl = fitControl*, it's possible to do:
+```{r}
+sum(1-modelFit_dt$results$Accuracy)/length(modelFit_dt$results$Accuracy)
+```
+### 3) random forest
+Again, I will use all non-empty columns of the PCA trainsformed dataset.
+```{r}
+modelFit_rf <- train(y=data_train$classe, x = trainPC, method="rf", data = trainPC, trControl = fitControl)
+pred_rf <- predict(modelFit_rf, newdata = testPC)
+confusionMatrix(pred_rf, data_test$classe)
+```
+#### Out of sample error
+Thanks to *trControl = fitControl*, it's possible to do:
+```{r}
+sum(1-modelFit_rf$results$Accuracy)/length(modelFit_rf$results$Accuracy)
+```
+## Predictions on the test dataset  
+
+Given the superiority of the random forest model over other tested models, I will proceed with making predictions for the assignment using my random forest model.
+```{r}
+pml_testing <- read.csv("~/data_science/practical_ml/pml-testing.csv")
+pml_testing <- pml_testing[, ind]
+pml_testingPC <- predict(preProc, pml_testing[, -93])
+pml_testingPC <- pml_testingPC[, c(1:3,37:65)]
+
+#predictions <- predict(modelFit_rf, newdata = pml_testingPC)
+```
